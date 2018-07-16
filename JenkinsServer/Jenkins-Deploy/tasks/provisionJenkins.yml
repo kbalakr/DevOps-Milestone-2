@@ -1,0 +1,213 @@
+- name: Install ca-certificates
+  apt: name=ca-certificates state=present
+
+- name: get credentials from vault
+  include_vars:
+    file: vault.yml
+    name: vault
+
+- name: Add key
+  apt_key:
+    url:  https://pkg.jenkins.io/debian-stable/jenkins.io.key
+    state: present
+- name: Add repository
+  lineinfile: 
+    path: /etc/apt/sources.list
+    line: deb https://pkg.jenkins.io/debian-stable binary/
+
+- name: Do update
+  apt:
+    update_cache: yes
+
+- name: Install pip
+  apt: 
+    name: python-pip
+    state: present
+
+- name: Install dopy
+  pip: 
+    name: dopy
+    executable: pip
+
+
+- name: Install passlib
+  pip:
+    name: passlib
+    executable: pip
+
+
+- name: Add Jdk repository
+  apt_repository: repo='ppa:openjdk-r/ppa' state=present update_cache=yes 
+
+- name: Install jdk
+  apt: name=openjdk-8-jdk state=present
+
+- name: Install jre
+  apt: name=openjdk-8-jre state=present
+
+- name: Install maven
+  apt: name=maven state=present
+  become: true
+
+- name: Install python-mysqldb
+  apt: name=python-mysqldb state=present
+  become: true
+
+- name: create development dir
+  file: path="{{ansible_env.HOME}}/development" state=directory 
+  become: true
+
+- name: downloading apache tomcat9
+  get_url:
+   # url: http://apache.claz.org/tomcat/tomcat-9/v9.0.0.M26/bin/apache-tomcat-9.0.0.M26.tar.gz
+    url: http://www-us.apache.org/dist/tomcat/tomcat-9/v9.0.1/bin/apache-tomcat-9.0.1.tar.gz
+    dest: "{{ansible_env.HOME}}/apache-tomcat-9.0.0.M26.tar.gz"
+    force: yes
+    mode: 755
+  become: true
+
+- name: unzip the apache9 files
+  unarchive:
+    src: "{{ansible_env.HOME}}/apache-tomcat-9.0.0.M26.tar.gz"
+    dest: "{{ansible_env.HOME}}/development"
+    remote_src: yes
+  become: true
+
+- name: Install sql-server
+  apt: name=mysql-server state=present
+  become: true
+
+- name: To accept lower case table names in mysql
+  lineinfile:
+    path: /etc/mysql/my.cnf
+    regexp: "skip-external-locking"
+    insertafter: "skip-external-locking"
+    line: "lower_case_table_names=1"
+  become: true
+
+- name: restart mysql-server
+  service:
+    name: mysql
+    state: restarted
+  become: true
+
+- name: wait for my-sql to start
+  wait_for: port=3306
+  become: true
+- name: Install sql-server
+  apt: name=mysql-server state=present
+  become: true
+- name: Install Jenkins
+  apt:
+    name: jenkins
+    state: present
+
+
+
+- name: Install git
+  apt: 
+    name: git
+    state: present
+
+- name: Install nodejs
+  apt:
+    name: nodejs-legacy
+    state: present
+    
+- name: Install npm
+  apt:
+    name: npm
+    state: present
+
+- name: Add repository
+  apt_repository: 
+    repo: ppa:ansible/ansible
+    state: present
+    update_cache: yes
+
+- name: update
+  apt:
+    update_cache: yes
+
+- name: Install ansible
+  apt:
+    name: ansible
+    state: present
+
+- name: sudoers
+  lineinfile:
+    dest: /etc/sudoers
+    state: present
+    line: jenkins ALL=(ALL) NOPASSWD:ALL
+    insertafter: EOF
+
+- name: create .ssh
+  file:
+    path: /var/lib/jenkins/.ssh
+    state: directory
+
+- name: Generate SSH keys
+  shell: ssh-keygen -b 2048 -t rsa -f /var/lib/jenkins/.ssh/id_rsa -q -N ""
+  args:
+    creates: /var/lib/jenkins/.ssh/id_rsa
+
+- name: set permissions for keys
+  shell: chown jenkins:jenkins id_rsa
+  args:
+    chdir: /var/lib/jenkins/.ssh
+
+- name: disable ssh key checking
+  replace:
+    path: /etc/ansible/ansible.cfg
+    regexp: "#host_key_checking = False"
+    replace: "host_key_checking = False"
+
+- name: Get Jenkins crumb
+  uri:
+    user: {{vault['jenkins_user']}}
+    password: {{vault['jenkins_password']}}
+    force_basic_auth: yes
+    url: "http://127.0.0.1:8080/crumbIssuer/api/json"
+    return_content: yes
+  register: jenkins_crumb
+  until: jenkins_crumb.content.find('Please wait while Jenkins is getting ready to work') == -1
+  retries: 10
+  delay: 5
+
+- name: Set crumb token
+  set_fact:
+    jenkins_crumb_token: "{{ jenkins_crumb.json.crumbRequestField }}={{ jenkins_crumb.json.crumb }}"
+
+- name: Install plugins
+  uri:
+    user: {{vault['jenkins_user']}}
+    password: {{vault['jenkins_password']}}
+    force_basic_auth: yes
+    url: "http://127.0.0.1:8080/pluginManager/install?plugin.{{ item }}.default=on&{{ jenkins_crumb_token }}"
+    method: POST
+    status_code: [200, 302]
+  #when: item not in jenkins_installed_plugins.json.plugins|map(attribute='shortName')|list
+  with_items: 
+    - git
+    - jacoco
+    - test-stability
+    - text-finder
+
+- name: Wait for plugins to be installed
+  uri:
+    user: {{vault['jenkins_user']}}
+    password: {{vault['jenkins_password']}}
+    force_basic_auth: yes
+    url: "http://127.0.0.1:8080/updateCenter/installStatus?{{ jenkins_crumb_token }}"
+    return_content: yes
+  register: jenkins_plugin_status
+  until: "'Pending' not in jenkins_plugin_status.json.data.jobs|map(attribute='installStatus')"
+  retries: 60
+  delay: 10
+  
+- name: Restart Jenkins to activate new plugins
+  service: name=jenkins state=restarted
+
+- name: Wait for Jenkins to become available
+  wait_for: port=8080
+

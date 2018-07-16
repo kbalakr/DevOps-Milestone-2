@@ -1,0 +1,35 @@
+- hosts: localhost
+  become: yes
+  tasks: 
+
+  - name:  get credentials from vault
+    include_vars:
+      file: vault.yml
+      name: vault
+
+  - name: Get Jenkins crumb
+    uri:
+      user: {{vault['jenkins_user']}}
+      password: {{vault['jenkins_password']}}
+      force_basic_auth: yes
+      url: "http://127.0.0.1:8080/crumbIssuer/api/json"
+      return_content: yes
+    register: jenkins_crumb
+    #until: jenkins_crumb.content.find('Please wait while Jenkins is getting ready to work') == -1
+    retries: 10
+    delay: 5
+
+  - name: Set crumb token
+    set_fact:
+      jenkins_crumb_token: "{{ jenkins_crumb.json.crumbRequestField }}={{ jenkins_crumb.json.crumb }}"
+
+  - name: Run build job
+    uri:
+      user: {{vault['jenkins_user']}}
+      password: {{vault['jenkins_password']}}
+      force_basic_auth: yes
+      url: "http://127.0.0.1:8080/job/itrust_job2/build"
+      method: POST
+      headers:
+        Jenkins-Crumb : "{{ jenkins_crumb.json.crumb }}"
+      status_code: 201
